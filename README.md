@@ -5,7 +5,7 @@ Docker sandbox backend for AI agents — execute code safely in isolated contain
 ## Installation
 
 ```bash
-pip install langchain-docker-backend
+pip install git+https://github.com/KeithBoynton/langchain-docker-backend.git
 ```
 
 **Prerequisites:** Docker must be installed and running. The default image below works out of the box — pull it before first use:
@@ -19,6 +19,18 @@ docker pull ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 ## Connecting to Docker
 
 `DockerSandbox` connects to Docker via `docker.from_env()`. By default it reads the `DOCKER_HOST` environment variable, falling back to the local Unix socket (`/var/run/docker.sock`).
+
+To reconnect to a named container after the process that created it has exited,
+use `from_existing_container`. It validates the configured image and starts
+containers that are stopped or paused:
+
+```python
+sandbox = DockerSandbox.from_existing_container(
+    "job-42-implementation",
+    image="python:3.13-slim",
+    auto_remove=False,
+)
+```
 
 ### Local Docker (default)
 
@@ -266,6 +278,7 @@ The exception is `upload_files` and `download_files`. These remain **developer-o
 | `edit(path, find, replace)` | Find and replace in a file |
 | `upload_files(files)` | Upload binary files (tar-based) |
 | `download_files(paths)` | Download binary files (tar-based) |
+| `from_existing_container(container_name, image, ...)` | Attach to an existing named container, starting it if stopped |
 | `close()` | Stop and optionally remove container |
 
 ### `ExecuteResponse`

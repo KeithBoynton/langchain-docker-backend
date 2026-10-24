@@ -70,6 +70,81 @@ def test_default_run_kwargs_unchanged(mock_client):
         assert key not in kwargs
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_call"),
+    [
+        ("running", None),
+        ("created", "start"),
+        ("exited", "start"),
+        ("paused", "unpause"),
+    ],
+)
+def test_attach_to_existing_container(mock_client, status, expected_call):
+    """Attaching reuses the named container and starts it when necessary."""
+    from langchain_docker_backend import DockerSandbox
+
+    container = MagicMock()
+    container.status = status
+    container.attrs = {"Config": {"Image": "example/image:latest"}}
+    container.short_id = "existing-id"
+    container.start.side_effect = lambda: setattr(container, "status", "running")
+    container.unpause.side_effect = lambda: setattr(container, "status", "running")
+    mock_client.containers.get.return_value = container
+
+    sandbox = DockerSandbox.from_existing_container(
+        "job_implementation",
+        image="example/image:latest",
+        auto_remove=False,
+    )
+
+    assert sandbox.id == "existing-id"
+    mock_client.containers.get.assert_called_once_with("job_implementation")
+    mock_client.containers.run.assert_not_called()
+    if expected_call:
+        getattr(container, expected_call).assert_called_once()
+    else:
+        container.start.assert_not_called()
+        container.unpause.assert_not_called()
+
+
+def test_attach_rejects_container_with_unexpected_image(mock_client):
+    """A name collision with a different image is not reused."""
+    from langchain_docker_backend import DockerSandbox
+
+    container = MagicMock()
+    container.status = "running"
+    container.attrs = {"Config": {"Image": "unexpected/image:latest"}}
+    mock_client.containers.get.return_value = container
+
+    with pytest.raises(ValueError, match="expected 'example/image:latest'"):
+        DockerSandbox.from_existing_container(
+            "job_implementation",
+            image="example/image:latest",
+        )
+
+    mock_client.close.assert_called_once()
+    mock_client.containers.run.assert_not_called()
+
+
+def test_attach_rejects_unusable_container_state(mock_client):
+    """Unknown container states fail explicitly instead of being removed."""
+    from langchain_docker_backend import DockerSandbox
+
+    container = MagicMock()
+    container.status = "dead"
+    container.attrs = {"Config": {"Image": "example/image:latest"}}
+    mock_client.containers.get.return_value = container
+
+    with pytest.raises(RuntimeError, match="state 'dead'"):
+        DockerSandbox.from_existing_container(
+            "job_implementation",
+            image="example/image:latest",
+        )
+
+    container.remove.assert_not_called()
+    mock_client.close.assert_called_once()
+
+
 def test_network_mode_and_dns_forwarded(mock_client):
     """network_mode and dns reach containers.run()."""
     from langchain_docker_backend import DockerSandbox

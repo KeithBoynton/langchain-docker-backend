@@ -108,6 +108,130 @@ class DockerSandbox(BaseSandbox):
         gpus: int | str | None = None,
         container_kwargs: dict[str, Any] | None = None,
     ) -> None:
+        self._configure(
+            image=image,
+            container_name=container_name,
+            volumes=volumes,
+            working_dir=working_dir,
+            auto_remove=auto_remove,
+            execute_timeout=execute_timeout,
+            max_output_bytes=max_output_bytes,
+            docker_client_kwargs=docker_client_kwargs,
+            network_mode=network_mode,
+            dns=dns,
+            gpus=gpus,
+            container_kwargs=container_kwargs,
+        )
+
+        # Verify the image is available locally before creating the container.
+        self._check_image()
+
+        self._container = self._create_container()
+        self.execute(f"mkdir -p {working_dir}")
+
+        logger.info(
+            "DockerSandbox initialized: container=%s, image=%s, network_mode=%s",
+            self._container.short_id,
+            image,
+            network_mode or "default",
+        )
+
+    @classmethod
+    def from_existing_container(
+        cls,
+        container_name: str,
+        image: str = _DEFAULT_IMAGE,
+        volumes: dict[str, dict[str, str]] | None = None,
+        working_dir: str = _DEFAULT_WORKING_DIR,
+        auto_remove: bool = True,
+        execute_timeout: int = _DEFAULT_EXECUTE_TIMEOUT,
+        max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        docker_client_kwargs: dict[str, Any] | None = None,
+        network_mode: str | None = None,
+        dns: list[str] | None = None,
+        gpus: int | str | None = None,
+        container_kwargs: dict[str, Any] | None = None,
+    ) -> DockerSandbox:
+        """Attach a sandbox instance to an existing named Docker container.
+
+        A stopped container is started before returning. Its configured image
+        must match ``image`` so a stale or unrelated named container is never
+        silently reused.
+        """
+        if not container_name:
+            raise ValueError("container_name must be a non-empty string.")
+
+        sandbox = cls.__new__(cls)
+        sandbox._configure(
+            image=image,
+            container_name=container_name,
+            volumes=volumes,
+            working_dir=working_dir,
+            auto_remove=auto_remove,
+            execute_timeout=execute_timeout,
+            max_output_bytes=max_output_bytes,
+            docker_client_kwargs=docker_client_kwargs,
+            network_mode=network_mode,
+            dns=dns,
+            gpus=gpus,
+            container_kwargs=container_kwargs,
+        )
+
+        try:
+            container = sandbox._client.containers.get(container_name)
+            container.reload()
+            configured_image = container.attrs.get("Config", {}).get("Image")
+            if configured_image != image:
+                raise ValueError(
+                    f"Existing container '{container_name}' uses image "
+                    f"'{configured_image}', expected '{image}'."
+                )
+
+            if container.status == "paused":
+                container.unpause()
+            elif container.status in {"created", "exited"}:
+                container.start()
+            elif container.status != "running":
+                raise RuntimeError(
+                    f"Cannot attach to container '{container_name}' in "
+                    f"state '{container.status}'."
+                )
+
+            container.reload()
+            if container.status != "running":
+                raise RuntimeError(
+                    f"Container '{container_name}' did not reach the running state "
+                    f"(state: '{container.status}')."
+                )
+
+            sandbox._container = container
+        except Exception:
+            sandbox._client.close()
+            raise
+
+        logger.info(
+            "DockerSandbox attached to existing container: container=%s, image=%s",
+            sandbox._container.short_id,
+            image,
+        )
+        return sandbox
+
+    def _configure(
+        self,
+        *,
+        image: str,
+        container_name: str | None,
+        volumes: dict[str, dict[str, str]] | None,
+        working_dir: str,
+        auto_remove: bool,
+        execute_timeout: int,
+        max_output_bytes: int,
+        docker_client_kwargs: dict[str, Any] | None,
+        network_mode: str | None,
+        dns: list[str] | None,
+        gpus: int | str | None,
+        container_kwargs: dict[str, Any] | None,
+    ) -> None:
         self._image = image
         self._container_name = container_name or f"sandbox-{uuid.uuid4().hex[:12]}"
         self._volumes = volumes or {}
@@ -125,19 +249,6 @@ class DockerSandbox(BaseSandbox):
 
         client_kwargs = docker_client_kwargs or {}
         self._client = docker.from_env(**client_kwargs)
-
-        # Verify the image is available locally before creating the container.
-        self._check_image()
-
-        self._container = self._create_container()
-        self.execute(f"mkdir -p {working_dir}")
-
-        logger.info(
-            "DockerSandbox initialized: container=%s, image=%s, network_mode=%s",
-            self._container.short_id,
-            image,
-            network_mode or "default",
-        )
 
     def _validate_container_options(self) -> None:
         """Validate ``gpus`` and ``container_kwargs``.
